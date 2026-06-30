@@ -1,0 +1,11 @@
+build/
+*.rkllm
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+.idea/
+.vscode/
+cmake-build-*/
+CMakeUserPresets.json

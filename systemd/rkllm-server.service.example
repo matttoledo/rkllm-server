@@ -1,0 +1,35 @@
+[Unit]
+Description=rkllm-server (Qwen/Llama/Phi on Rockchip NPU via HTTP)
+Documentation=https://github.com/matttoledo/rkllm-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Replace REPLACE_ME with the user that owns the rkllm-server checkout.
+# The user must be in the `render` and `video` groups for /dev/dri/* access.
+User=REPLACE_ME
+Group=REPLACE_ME
+SupplementaryGroups=render video
+
+WorkingDirectory=/home/REPLACE_ME/rkllm-server/build
+
+# Adjust the absolute paths to wherever you installed the binary and the model.
+# Optional: --port 18080 (default), --prompt-file /path/to/prompt.txt
+ExecStart=/home/REPLACE_ME/rkllm-server/build/rkllm_server \
+    /home/REPLACE_ME/models/Qwen2.5-1.5B-Instruct.rkllm
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rkllm-server
+
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
