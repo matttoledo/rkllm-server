@@ -13,18 +13,17 @@ at startup — write plain text, no chat-template markers needed.
 
 | File | Use case | Output schema |
 |---|---|---|
-| `vidracaria.txt` | Brazilian glass-shop quote extractor (original use case) | `{intent, product?}` |
 | `customer_support.txt` | Classify support tickets + extract entities | `{intent, entities}` |
-| `e_commerce_order.txt` | Parse order requests from chat | `{intent, items[]}` |
+| `e_commerce_order.txt` | Parse natural-language order requests | `{intent, items[]}` |
 
 ## Compatibility with `/process`
 
-The bundled `/process` endpoint has **adaptive recovery** that validates output
-against a fixed JSON schema (the vidraçaria one). If you swap the prompt with
-`--prompt-file`, `/process` will likely report "invalid output" and re-init.
+`/process` validates only that the output is a JSON object with a string `intent`
+field. Both example prompts above satisfy that and benefit from adaptive
+recovery — just swap them in with `--prompt-file`.
 
-**Use `/generate` for non-default prompts.** It returns raw output with no
-schema validation:
+If your output schema doesn't fit `{intent: "..."}`, use `/generate` instead —
+it returns raw output with no validation:
 
 ```bash
 curl -X POST http://localhost:18080/generate -H "Content-Type: application/json" -d '{
@@ -33,8 +32,8 @@ curl -X POST http://localhost:18080/generate -H "Content-Type: application/json"
 }'
 ```
 
-To get `/process`-style adaptive recovery with your own schema, fork
-`src/main.cpp` and adapt `is_valid_intent_response()` / `process_with_recovery()`.
+For stricter schema validation (e.g. enum-bound intent, required nested fields),
+fork `src/main.cpp` and adapt `is_valid_intent_response()` / `process_with_recovery()`.
 A configurable JSON-Schema validator is on the roadmap.
 
 ## Writing a good prompt for small NPU models

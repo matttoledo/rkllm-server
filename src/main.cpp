@@ -7,8 +7,9 @@
 //
 // Endpoints:
 //   POST /process   {"text":"..."}
-//       Opinionated extractor for the bundled system prompt (a vidraçaria
-//       quote-extractor by default) — runs adaptive recovery on invalid JSON.
+//       Opinionated extractor using the bundled (or --prompt-file) system
+//       prompt. Validates output as JSON with a string "intent" field;
+//       triggers adaptive recovery if malformed.
 //   POST /generate  {"system_prompt":"...","user_text":"..."}
 //       Generic passthrough — caller provides the system prompt, server
 //       returns raw output. No validation. Chat template is restored after.
@@ -90,49 +91,35 @@ int rkllm_callback(RKLLMResult *result, void *userdata, LLMCallState state) {
 // markers. The wrapper below adds <|im_start|>system\n...\n<|im_end|>\n at init.
 // Override at runtime: ./rkllm_server <model> --prompt-file <path>
 //
-// This default is a Brazilian-Portuguese glass-shop (vidraçaria) quote extractor
-// — the original real-world use case. See examples/prompts/ for alternatives.
+// This default is a minimal intent-and-entity classifier — enough to exercise
+// /process end-to-end out of the box. See examples/prompts/ for richer variants
+// (customer support, e-commerce orders) you can use with --prompt-file.
 
 static const char* DEFAULT_SYS_PROMPT_CONTENT =
-"Voce e o orcamentista de uma vidracaria. Receba a mensagem do cliente e responda APENAS com um JSON em uma linha.\n"
+"You are a structured-output classifier. Read the user message and respond with ONE LINE of JSON. No prose.\n"
 "\n"
-"Schema OBRIGATORIO:\n"
-"{\"intent\":\"quote_request|greeting|followup|other\",\"product\":<obj-ou-null>}\n"
+"Schema:\n"
+"{\"intent\":\"greeting|question|request|complaint|other\",\"entities\":{...}}\n"
 "\n"
-"Quando intent=quote_request, o product DEVE ter:\n"
-"{\"type\":\"PORTA|JANELA|BOX|FIXO|SACADA|BASCULANTE\",\"width_cm\":<int>,\"height_cm\":<int>,\"sheets\":<int>,\"color\":\"INCOLOR\"}\n"
+"Intent rules:\n"
+"- greeting: hi, hello, thanks, bye, small talk\n"
+"- question: customer asking for information (price, availability, policy)\n"
+"- request: customer wants to DO something (buy, return, cancel, schedule)\n"
+"- complaint: customer is frustrated or reporting a problem\n"
+"- other: anything that does not fit above\n"
 "\n"
-"REGRAS DE DIMENSAO:\n"
-"- Sempre em CENTIMETROS (cm)\n"
-"- 1m = 100cm. \"1,20\" ou \"1,20m\" = 120cm. \"0,80\" = 80cm.\n"
-"- Numeros sem unidade ja SAO em cm e devem ser usados como estao (NAO multiplique).\n"
-"- \"60x40\" = 60cm x 40cm. NUNCA inflar pra 600x400.\n"
+"entities is always an object — empty when no relevant fields detected.\n"
+"Populate fields you can extract verbatim from the message. Common ones:\n"
+"  topic, product, order_id, action, urgency (low|normal|high), issue\n"
+"Use lower_snake_case keys. Omit fields you are not confident about.\n"
 "\n"
-"REGRAS DE TYPE (estrutura, nao tipo de vidro):\n"
-"- \"porta\" -> PORTA\n"
-"- \"janela\" -> JANELA\n"
-"- \"box\" (chuveiro/banheiro) -> BOX\n"
-"- \"sacada\"/\"varanda\" -> SACADA\n"
-"- \"basculante\" -> BASCULANTE\n"
-"- Se for um vidro/espelho sem estrutura aparente -> FIXO\n"
-"\n"
-"REGRAS DE INTENT:\n"
-"- quote_request: cliente pede orcamento com dimensoes ou estrutura clara.\n"
-"- greeting: \"oi\", \"bom dia\", \"obrigado\", \"valeu\".\n"
-"- followup: \"tem em azul?\", \"qual prazo?\", \"e a cor?\", \"pode mandar?\".\n"
-"- other: tudo o que nao se encaixa.\n"
-"\n"
-"Defaults: sheets=1, color=\"INCOLOR\".\n"
-"\n"
-"Exemplos:\n"
-"\"vidro temperado 1,20x0,80\" => {\"intent\":\"quote_request\",\"product\":{\"type\":\"FIXO\",\"width_cm\":120,\"height_cm\":80,\"sheets\":1,\"color\":\"INCOLOR\"}}\n"
-"\"espelho 60x40\" => {\"intent\":\"quote_request\",\"product\":{\"type\":\"FIXO\",\"width_cm\":60,\"height_cm\":40,\"sheets\":1,\"color\":\"INCOLOR\"}}\n"
-"\"porta de vidro 2m x 80cm, 10mm\" => {\"intent\":\"quote_request\",\"product\":{\"type\":\"PORTA\",\"width_cm\":200,\"height_cm\":80,\"sheets\":1,\"color\":\"INCOLOR\"}}\n"
-"\"box de banheiro 1,80m x 90cm temperado 8mm\" => {\"intent\":\"quote_request\",\"product\":{\"type\":\"BOX\",\"width_cm\":180,\"height_cm\":90,\"sheets\":1,\"color\":\"INCOLOR\"}}\n"
-"\"oi bom dia\" => {\"intent\":\"greeting\",\"product\":null}\n"
-"\"obrigado\" => {\"intent\":\"greeting\",\"product\":null}\n"
-"\"tem em azul?\" => {\"intent\":\"followup\",\"product\":null}\n"
-"\"qual o prazo de entrega?\" => {\"intent\":\"followup\",\"product\":null}";
+"Examples:\n"
+"\"hi there\" => {\"intent\":\"greeting\",\"entities\":{}}\n"
+"\"do you ship to brazil?\" => {\"intent\":\"question\",\"entities\":{\"topic\":\"shipping\",\"region\":\"brazil\"}}\n"
+"\"i want to return order 12345 it arrived broken\" => {\"intent\":\"request\",\"entities\":{\"action\":\"return\",\"order_id\":\"12345\",\"issue\":\"damaged\"}}\n"
+"\"this is the 3rd time my package is late!!!\" => {\"intent\":\"complaint\",\"entities\":{\"issue\":\"late delivery\",\"urgency\":\"high\"}}\n"
+"\"how much is the blue one?\" => {\"intent\":\"question\",\"entities\":{\"topic\":\"price\",\"variant\":\"blue\"}}\n"
+"\"cancel my last order please\" => {\"intent\":\"request\",\"entities\":{\"action\":\"cancel\"}}";
 
 // Populated at startup with the wrapped chat template (default OR --prompt-file).
 static std::string g_sys_prompt;
@@ -247,23 +234,17 @@ static bool extract_json_object(const std::string& raw, std::string& json_out) {
     return false;
 }
 
+// Loose structural check for /process output:
+//  - parses as a JSON object
+//  - has a string "intent" field
+// This is intentionally permissive so /process keeps working when users swap
+// the system prompt via --prompt-file. Add domain-specific validation in your
+// own application layer, or fork this for stricter checks (e.g. JSON Schema).
 static bool is_valid_intent_response(const json& j) {
-    if (!j.contains("intent") || !j["intent"].is_string()) return false;
-    std::string intent = j["intent"];
-    if (intent != "quote_request" && intent != "greeting" &&
-        intent != "followup" && intent != "other") return false;
-    if (intent == "quote_request") {
-        if (!j.contains("product") || j["product"].is_null()) return false;
-        const auto& p = j["product"];
-        if (!p.contains("type") || !p.contains("width_cm") || !p.contains("height_cm")) return false;
-        std::string t = p["type"];
-        if (t != "PORTA" && t != "JANELA" && t != "BOX" &&
-            t != "FIXO" && t != "SACADA" && t != "BASCULANTE") return false;
-        int w = p["width_cm"].get<int>();
-        int h = p["height_cm"].get<int>();
-        if (w < 5 || w > 600 || h < 5 || h > 600) return false;
-    }
-    return true;
+    return j.is_object()
+        && j.contains("intent")
+        && j["intent"].is_string()
+        && !j["intent"].get<std::string>().empty();
 }
 
 // ---------- adaptive recovery ------------------------------------------------
@@ -451,7 +432,7 @@ static void print_usage(const char* prog) {
               << "Options:\n"
               << "  --port <N>             HTTP port to listen on (default: 18080)\n"
               << "  --prompt-file <path>   Plain-text file with the system prompt content\n"
-              << "                         (default: bundled vidraçaria example)\n"
+              << "                         (default: bundled intent/entity classifier example)\n"
               << "  -h, --help             Print this message\n"
               << std::endl;
 }

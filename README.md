@@ -72,10 +72,10 @@ Output: `build/rkllm_server`.
 ## Run
 
 ```bash
-# With the bundled vidraçaria (Portuguese glass-shop) example prompt
+# With the bundled minimal intent classifier prompt
 ./build/rkllm_server ~/models/Qwen2.5-1.5B-Instruct.rkllm
 
-# With your own prompt
+# With a richer prompt from examples/ (or your own)
 ./build/rkllm_server ~/models/Qwen2.5-1.5B-Instruct.rkllm \
     --prompt-file examples/prompts/customer_support.txt \
     --port 18080
@@ -131,37 +131,37 @@ curl -X POST http://localhost:18080/generate \
 
 ### `POST /process` — opinionated extractor (uses the configured system prompt)
 
-Designed for structured extraction with JSON output. Includes **adaptive recovery**:
-if the model returns invalid JSON, the handle is destroyed + reinitialized + the
-request is retried once. The default validator expects the bundled vidraçaria
-schema (`{intent, product?}`).
+Designed for structured extraction. Includes **adaptive recovery**: if the
+model returns malformed output, the handle is destroyed + reinitialized + the
+request is retried once. The default validator is permissive — it just checks
+that the output is a JSON object with a non-empty string `intent` field, so it
+works with the bundled prompt *and* any prompt you load via `--prompt-file`
+that produces an `{"intent": "...", ...}` shape.
 
 ```bash
 curl -X POST http://localhost:18080/process \
   -H "Content-Type: application/json" \
-  -d '{"text":"vidro temperado 1,20x0,80"}'
+  -d '{"text":"i want to return order 12345 it arrived broken"}'
 ```
 
 ```json
 {
-  "intent": "quote_request",
-  "product": {
-    "type": "FIXO",
-    "width_cm": 120,
-    "height_cm": 80,
-    "sheets": 1,
-    "color": "INCOLOR"
+  "intent": "request",
+  "entities": {
+    "action": "return",
+    "order_id": "12345",
+    "issue": "damaged"
   },
-  "total_latency_ms": 3204,
-  "decode_tps": 14.3,
+  "total_latency_ms": 1840,
+  "decode_tps": 14.1,
   "reinit_used": false,
   "raw_output": "..."
 }
 ```
 
-If you change the prompt with `--prompt-file`, use `/generate` instead —
-`/process` will keep trying to parse the vidraçaria schema and re-initing on every
-request. A configurable JSON-Schema validator is on the roadmap.
+If your prompt produces an output shape that doesn't fit `{intent: "..."}`,
+use `/generate` instead — it has no validation. A configurable JSON-Schema
+validator for `/process` is on the roadmap.
 
 ## systemd
 
@@ -202,12 +202,13 @@ adding `extra_hosts: ["host.docker.internal:host-gateway"]` to your service spec
 
 - **Pin rknn-llm v1.2.1.** v1.3.0 has a [SIGSEGV on RK3588](https://github.com/airockchip/rknn-llm/issues/509)
   during `rkllm_run`. The CMakeLists looks for headers compatible with v1.2.1.
-- **NPU is single-threaded.** Concurrent requests are serialized via mutex. For a
-  vidraçaria-volume workload (~dozens of msgs/day) this is fine; for higher
-  throughput, run multiple instances behind a load balancer.
-- **w8a8 quant occasionally hallucinates small numbers.** "60x40" can become
-  "600x400" if your prompt doesn't have a negative example. See
-  `examples/prompts/vidracaria.txt` for the workaround.
+- **NPU is single-threaded.** Concurrent requests are serialized via mutex. Fine
+  for small/medium workloads (dozens to low hundreds of msgs/min on Qwen 1.5B);
+  for higher throughput, run multiple instances behind a load balancer.
+- **Small quantized models hallucinate small numbers occasionally.** With w8a8,
+  inputs like `"60x40"` can be inflated to `"600x400"`. Include negative
+  examples ("60x40 means 60 and 40 — do NOT multiply") in your few-shot prompt
+  to mitigate.
 
 ## Comparison
 
